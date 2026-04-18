@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@elevenlabs/react": "latest",
+    "@elevenlabs/elevenlabs-js": "latest",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0"
+  }
+}
