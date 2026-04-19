@@ -18,18 +18,20 @@ async function analyzeTranscript(transcript) {
   return res.json()
 }
 
+function percentageToRiskLevel(percentage) {
+  if (percentage >= 85) return 'critical'
+  if (percentage >= 60) return 'high'
+  if (percentage >= 30) return 'medium'
+  return 'low'
+}
+
 function normalizeAnalysisResponse(raw) {
   if (!raw || typeof raw !== 'object') return null
 
   const score = Number(raw.percentage ?? raw.scam_likelihood_score ?? 0)
   const percentage = Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : 0
 
-  const riskLevel = raw.riskLevel ?? (
-    percentage >= 85 ? 'critical'
-      : percentage >= 60 ? 'high'
-        : percentage >= 30 ? 'medium'
-          : 'low'
-  )
+  const riskLevel = raw.riskLevel ?? percentageToRiskLevel(percentage)
 
   const flaggedWords = Array.isArray(raw.flaggedWords)
     ? raw.flaggedWords
@@ -59,6 +61,8 @@ const riskConfig = {
   critical: { label: 'Critical', position: '87.5%', color: '#ef4444', tooltip: 'Highly likely to be a fraudulent call' },
 }
 
+const MIN_WORDS_FOR_ANALYSIS = 6
+
 function highlightTranscript(text, flaggedWords) {
   if (!flaggedWords || flaggedWords.length === 0) return text
   const regex = new RegExp(`(${flaggedWords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
@@ -80,6 +84,10 @@ function App() {
   const sessionStartIndexRef = useRef(0)
   const recordingRef = useRef(false)
   const stoppingRef = useRef(false)
+  const riskSamplesRef = useRef([])
+  const peakRiskRef = useRef(0)
+  const crossed50Ref = useRef(false)
+  const analysisSessionIdRef = useRef(0)
 
   function stopAnalysisPolling() {
     clearInterval(analysisIntervalRef.current)
@@ -103,8 +111,9 @@ function App() {
     },
   })
 
+  const sessionStartIndex = Math.min(sessionStartIndexRef.current, scribe.committedTranscripts.length)
   const sessionCommittedText = scribe.committedTranscripts
-    .slice(sessionStartIndexRef.current)
+    .slice(sessionStartIndex)
     .map(t => t.text)
     .join(' ')
   const sessionPartialText = recording ? scribe.partialTranscript : ''
@@ -133,9 +142,19 @@ function App() {
       return
     }
     stoppingRef.current = false
+    analysisSessionIdRef.current += 1
+    const currentSessionId = analysisSessionIdRef.current
     setRecording(true)
-    setAnalysis(null)
+    setAnalysis({
+      percentage: 0,
+      riskLevel: 'low',
+      flaggedWords: [],
+      summary: 'Listening... gathering enough context to analyze.',
+    })
     setStaleTranscript('')
+    riskSamplesRef.current = []
+    peakRiskRef.current = 0
+    crossed50Ref.current = false
     transcriptRef.current = ''
     sessionStartIndexRef.current = scribe.committedTranscripts.length
 
@@ -159,14 +178,43 @@ function App() {
       if (!recordingRef.current) return
       const latestTranscript = transcriptRef.current.trim()
       if (!latestTranscript) return
+      const wordCount = latestTranscript.split(/\s+/).filter(Boolean).length
+      if (wordCount < MIN_WORDS_FOR_ANALYSIS) {
+        setAnalysis((prev) => ({
+          ...(prev ?? {}),
+          percentage: 0,
+          riskLevel: 'low',
+          flaggedWords: [],
+          summary: 'Listening... gathering enough context to analyze.',
+        }))
+        return
+      }
 
       const payload = { transcript: latestTranscript }
       console.log('[Gemini payload]', JSON.stringify(payload, null, 2))
 
       try {
         const result = await analyzeTranscript(latestTranscript)
+        if (analysisSessionIdRef.current !== currentSessionId || !recordingRef.current) return
         const normalized = normalizeAnalysisResponse(result)
-        if (normalized) setAnalysis(normalized)
+        if (!normalized) return
+
+        riskSamplesRef.current.push(normalized.percentage)
+        peakRiskRef.current = Math.max(peakRiskRef.current, normalized.percentage)
+        if (normalized.percentage >= 50) {
+          crossed50Ref.current = true
+        }
+
+        // Once risk crosses 50, keep the live score from dropping below 50.
+        const livePercentage = crossed50Ref.current
+          ? Math.max(normalized.percentage, 50)
+          : normalized.percentage
+
+        setAnalysis({
+          ...normalized,
+          percentage: livePercentage,
+          riskLevel: percentageToRiskLevel(livePercentage),
+        })
       } catch (e) {
         console.error('Analyze error:', e)
       }
@@ -175,11 +223,26 @@ function App() {
 
   function handleStop() {
     stoppingRef.current = true
+    analysisSessionIdRef.current += 1
     stopAnalysisPolling()
-    const transcriptAtStop = transcriptRef.current.trim()
+    const transcriptAtStop = fullTranscript.trim()
     if (transcriptAtStop) {
       setStaleTranscript(transcriptAtStop)
     }
+
+    const samples = riskSamplesRef.current
+    if (samples.length > 0 && analysis) {
+      const finalPercentage = crossed50Ref.current
+        ? peakRiskRef.current
+        : Math.round(samples.reduce((sum, value) => sum + value, 0) / samples.length)
+
+      setAnalysis({
+        ...analysis,
+        percentage: finalPercentage,
+        riskLevel: percentageToRiskLevel(finalPercentage),
+      })
+    }
+
     scribe.disconnect()
     setRecording(false)
     recordingRef.current = false
