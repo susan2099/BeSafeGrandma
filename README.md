@@ -1,30 +1,6 @@
-# LieDetector
+# BeSafeGrandma
 
 Real-time call transcription with ElevenLabs + scam likelihood analysis using Gemini.
-
-## Project Structure
-
-- `server/`: Node.js backend (token generation + Gemini analysis)
-- `client/`: Vite React frontend
-- `client/src/`: frontend source code
-
-## Server Setup
-
-1. Copy `server/.env.example` to `server/.env`
-2. Fill in:
-	- `ELEVENLABS_API_KEY`
-	- `GEMINI_API_KEY`
-	- optional `PORT` (default `3001`)
-3. Install dependencies and run:
-
-```bash
-cd server
-npm install
-npm run dev
-```
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
-
 
 ## Inspiration
 Over 60 million Americans fall victim to phone scams annually. We were struck by how something as simple as answering a call could become a moment of vulnerability, especially for older adults and non-tech-savvy users. That realization drove us to build a solution that restores trust in everyday communication.
