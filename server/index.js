@@ -48,6 +48,62 @@ function normalizeGeminiResponse(payload) {
   };
 }
 
+async function analyzeWithGemma4(transcript) {
+  const prompt = `
+You are an expert fraud investigator.
+Analyze phone call transcripts for signs of social engineering, phishing, or financial scams.
+
+Return ONLY valid JSON.
+Do not include markdown.
+Do not include explanations outside JSON.
+
+The JSON must exactly match this structure:
+{
+  "scam_likelihood_score": 0,
+  "critical_indicators": ["string"],
+  "reasoning_summary": "string"
+}
+
+Rules:
+- "scam_likelihood_score" must be an integer from 1 to 100
+- "critical_indicators" must be an array of suspicious text segments or scam indicators found in the transcript
+- "reasoning_summary" must briefly explain why the transcript appears safe or suspicious
+
+Analyze the following transcript:
+
+${transcript}
+`;
+
+  const response = await fetch("http://localhost:11434/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gemma4:e4b",
+      prompt,
+      stream: false,
+      format: "json",
+      options: {
+        temperature: 0.2,
+      },
+    }),
+  });
+
+  const raw = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`Gemma request failed (${response.status}): ${JSON.stringify(raw)}`);
+  }
+
+  const candidateText = typeof raw?.response === "string" ? raw.response : "";
+
+  if (!candidateText) {
+    throw new Error("Gemma response did not include JSON content.");
+  }
+
+  const parsed = JSON.parse(candidateText);
+  return normalizeGeminiResponse(parsed);
+}
+
 async function analyzeWithGemini(transcript) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -145,8 +201,15 @@ app.post("/api/analyze", async (req, res) => {
       return;
     }
 
-    const result = await analyzeWithGemini(transcript);
+    //const result = await analyzeWithGemini(transcript);
+    const result = await analyzeWithGemma4(transcript);
     res.json(result);
+    console.log("type:", typeof result);
+    console.log("result:", result);
+
+    //console.log("result:", res);
+    //console.log("result:", JSON.stringify(res, null, 2));
+    //console.log(res);
   } catch (error) {
     console.error("Analyze error:", error);
     res.status(500).json({ error: String(error) });
