@@ -2,32 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useScribe } from '@elevenlabs/react'
 import './App.css'
 
-const TOKEN_URL = '/scribe-token'
-const ANALYZE_INTERVAL_MS = 5000
-
-const riskConfig = {
-  low: { label: 'Low', position: '12.5%', color: '#22c55e', tooltip: 'No significant signs of deception detected' },
-  medium: { label: 'Medium', position: '37.5%', color: '#eab308', tooltip: 'Some suspicious patterns identified' },
-  high: { label: 'High', position: '62.5%', color: '#f97316', tooltip: 'Strong indicators of a scam call' },
-  critical: { label: 'Critical', position: '87.5%', color: '#ef4444', tooltip: 'Highly likely to be a fraudulent call' },
-}
-
-async function fetchToken() {
-  const res = await fetch(TOKEN_URL, { cache: 'no-store' })
-  if (!res.ok) {
-    const errorText = await res.text()
-    throw new Error(`Token fetch failed (${res.status}): ${errorText}`)
-  }
-
-  const data = await res.json()
-  const token = typeof data?.token === 'string' ? data.token : ''
-  if (!token) {
-    throw new Error('Token payload is invalid.')
-  }
-
-  return token
-}
-
+// teammate fills in — sends transcript to backend, returns Gemini analysis
 async function analyzeTranscript(transcript) {
   const res = await fetch('/api/analyze', {
     method: 'POST',
@@ -43,253 +18,219 @@ async function analyzeTranscript(transcript) {
   return res.json()
 }
 
-function getSeverity(score) {
-  if (score >= 85) return 'critical'
-  if (score >= 60) return 'high'
-  if (score >= 30) return 'medium'
-  return 'low'
-}
-
-function normalizeScore(value) {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric)) return 0
-  return Math.max(0, Math.min(100, Math.round(numeric)))
-}
-
-function computeLikelihood(rawScore, previousScore, hasReachedThreshold) {
-  const current = normalizeScore(rawScore)
-
-  if (hasReachedThreshold || current >= 50) {
-    return Math.max(current, 50)
-  }
-
-  if (previousScore == null) {
-    return current
-  }
-
-  return Math.round((previousScore + current) / 2)
+const riskConfig = {
+  low:      { label: 'Low',      position: '12.5%', color: '#22c55e', tooltip: 'No significant signs of deception detected' },
+  medium:   { label: 'Medium',   position: '37.5%', color: '#eab308', tooltip: 'Some suspicious patterns identified' },
+  high:     { label: 'High',     position: '62.5%', color: '#f97316', tooltip: 'Strong indicators of a scam call' },
+  critical: { label: 'Critical', position: '87.5%', color: '#ef4444', tooltip: 'Highly likely to be a fraudulent call' },
 }
 
 function highlightTranscript(text, flaggedWords) {
   if (!flaggedWords || flaggedWords.length === 0) return text
-
-  const escaped = flaggedWords
-    .filter((w) => typeof w === 'string' && w.trim().length > 0)
-    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-
-  if (escaped.length === 0) return text
-
-  const regex = new RegExp(`(${escaped.join('|')})`, 'gi')
+  const regex = new RegExp(`(${flaggedWords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
   const parts = text.split(regex)
-
   return parts.map((part, i) =>
-    flaggedWords.some((w) => w.toLowerCase() === part.toLowerCase())
+    flaggedWords.some(w => w.toLowerCase() === part.toLowerCase())
       ? <mark key={i} className="highlight">{part}</mark>
-      : part,
+      : part
   )
 }
 
 function App() {
   const [recording, setRecording] = useState(false)
   const [analysis, setAnalysis] = useState(null)
-  const [likelihood, setLikelihood] = useState(0)
-  const [error, setError] = useState('')
 
   const analysisIntervalRef = useRef(null)
   const transcriptRef = useRef('')
   const sessionStartIndexRef = useRef(0)
-  const hasReachedThresholdRef = useRef(false)
-  const likelihoodRef = useRef(null)
-  const isAnalyzingRef = useRef(false)
-  const isConnectingRef = useRef(false)
-  const scribeRef = useRef(null)
+  const recordingRef = useRef(false)
+  const stoppingRef = useRef(false)
+
+  function stopAnalysisPolling() {
+    clearInterval(analysisIntervalRef.current)
+    analysisIntervalRef.current = null
+  }
 
   const scribe = useScribe({
     modelId: 'scribe_v2_realtime',
-    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
-    onAuthError: (data) => setError(data?.error || 'Authentication failed.'),
-    onQuotaExceededError: (data) => setError(data?.error || 'Quota exceeded.'),
-    onRateLimitedError: (data) => setError(data?.error || 'Rate limited.'),
-    onDisconnect: () => {
-      setRecording(false)
-      isConnectingRef.current = false
-      if (analysisIntervalRef.current) {
-        clearInterval(analysisIntervalRef.current)
-        analysisIntervalRef.current = null
+    onError: (e) => {
+      const message = String(e?.message ?? e ?? '')
+
+      // Ignore expected transient SDK errors during/after intentional disconnect.
+      if (message.includes('WebSocket is not connected') || stoppingRef.current) {
+        return
       }
+
+      console.error('ElevenLabs error:', e)
+      stopAnalysisPolling()
+      recordingRef.current = false
+      setRecording(false)
     },
   })
 
   const sessionCommittedText = scribe.committedTranscripts
     .slice(sessionStartIndexRef.current)
-    .map((t) => t.text)
+    .map(t => t.text)
     .join(' ')
   const sessionPartialText = recording ? scribe.partialTranscript : ''
-  const fullTranscript = sessionCommittedText + (sessionPartialText ? ` ${sessionPartialText}` : '')
+  const fullTranscript = sessionCommittedText + (sessionPartialText ? ' ' + sessionPartialText : '')
 
+  // keep a ref of latest live transcript (committed + partial) for interval access
   useEffect(() => {
     transcriptRef.current = fullTranscript
   }, [fullTranscript])
 
   useEffect(() => {
-    scribeRef.current = scribe
-  }, [scribe])
+    recordingRef.current = recording
+  }, [recording])
 
   useEffect(() => {
     return () => {
-      if (analysisIntervalRef.current) {
-        clearInterval(analysisIntervalRef.current)
-      }
-      scribeRef.current?.disconnect()
+      stopAnalysisPolling()
     }
   }, [])
 
   async function handleMicClick() {
-    if (recording || isConnectingRef.current) return
-    isConnectingRef.current = true
-
+    if (recording) return
+    stoppingRef.current = false
     setRecording(true)
-    setError('')
     setAnalysis(null)
-    setLikelihood(0)
     transcriptRef.current = ''
     sessionStartIndexRef.current = scribe.committedTranscripts.length
-    hasReachedThresholdRef.current = false
-    likelihoodRef.current = null
 
+    // connect to ElevenLabs
     try {
-      const token = await fetchToken()
+      const res = await fetch('/scribe-token')
+      const data = await res.json()
+      const token = data.token ?? data
       await scribe.connect({
         token,
         microphone: { echoCancellation: true, noiseSuppression: true },
       })
-      isConnectingRef.current = false
-
-      analysisIntervalRef.current = setInterval(async () => {
-        if (isAnalyzingRef.current) return
-
-        const latestTranscript = transcriptRef.current.trim()
-        if (!latestTranscript) return
-
-        isAnalyzingRef.current = true
-        try {
-          const result = await analyzeTranscript(latestTranscript)
-          const adjusted = computeLikelihood(
-            result?.scam_likelihood_score,
-            likelihoodRef.current,
-            hasReachedThresholdRef.current,
-          )
-
-          if (adjusted >= 50) {
-            hasReachedThresholdRef.current = true
-          }
-
-          likelihoodRef.current = adjusted
-          setLikelihood(adjusted)
-          setAnalysis(result)
-        } catch (analysisError) {
-          console.error('Analyze error:', analysisError)
-        } finally {
-          isAnalyzingRef.current = false
-        }
-      }, ANALYZE_INTERVAL_MS)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      console.error('Failed to connect to ElevenLabs:', e)
       setRecording(false)
-      isConnectingRef.current = false
+      return
     }
+
+    // poll Gemini every 5 seconds with latest transcript
+    analysisIntervalRef.current = setInterval(async () => {
+      if (!recordingRef.current) return
+      const latestTranscript = transcriptRef.current.trim()
+      if (!latestTranscript) return
+
+      const payload = { transcript: latestTranscript }
+      console.log('[Gemini payload]', JSON.stringify(payload, null, 2))
+
+      try {
+        const result = await analyzeTranscript(latestTranscript)
+        if (result) setAnalysis(result)
+      } catch (e) {
+        console.error('Analyze error:', e)
+      }
+    }, 5000)
   }
 
   function handleStop() {
-    if (analysisIntervalRef.current) {
-      clearInterval(analysisIntervalRef.current)
-      analysisIntervalRef.current = null
-    }
-
+    stoppingRef.current = true
+    stopAnalysisPolling()
     scribe.disconnect()
     setRecording(false)
+    recordingRef.current = false
     transcriptRef.current = ''
-    isConnectingRef.current = false
+    setTimeout(() => {
+      stoppingRef.current = false
+    }, 300)
   }
 
-  const severity = getSeverity(likelihood)
-  const config = analysis ? riskConfig[severity] : null
+  const config = analysis ? riskConfig[analysis.riskLevel] : null
   const borderColor = config ? config.color : 'transparent'
   const showTranscript = fullTranscript.trim() !== ''
 
-  const indicatorPhrases = Array.isArray(analysis?.critical_indicators)
-    ? analysis.critical_indicators
-    : []
-
   return (
     <div className="app" style={{ borderTop: `4px solid ${borderColor}`, transition: 'border-color 1s ease' }}>
-      <div className="mic-card">
-        <div className={`mic-wrapper ${recording ? 'recording' : ''}`}>
-          <div className="ring" />
-          <div className="ring delay1" />
-          <div className="ring delay2" />
-          <img
-            src="/microphone.png"
-            alt="Microphone"
-            onClick={handleMicClick}
-            style={{ cursor: scribe.isConnected ? 'default' : 'pointer' }}
-          />
+      <header className="hero">
+        <h1>
+          <span>BeSafe</span>
+          <span>Grandma</span>
+        </h1>
+        <p className="hero-subtitle">{recording ? 'Listening for scam signals' : 'Tap to analyze the call'}</p>
+      </header>
+
+      <section className="mic-section">
+        <div className="mic-card">
+          <div className={`mic-wrapper ${recording ? 'recording' : ''}`}>
+            <div className="ring" />
+            <div className="ring delay1" />
+            <div className="ring delay2" />
+            <img
+              src="/microphone.png"
+              alt="Microphone"
+              onClick={handleMicClick}
+              style={{ cursor: recording ? 'default' : 'pointer' }}
+            />
+          </div>
         </div>
-      </div>
+        <div className="mic-controls">
+          <p className="tap-label">{recording ? 'Recording...' : 'Tap to start'}</p>
+          {recording && (
+            <button className="stop-btn" onClick={handleStop}>Stop & Analyze</button>
+          )}
+        </div>
+      </section>
 
-      <div className="mic-controls">
-        <p className="tap-label">{recording ? 'Recording...' : 'Tap to start'}</p>
-        {recording && (
-          <button className="stop-btn" onClick={handleStop}>Stop & Analyze</button>
-        )}
-        {error && <p className="error-text">{error}</p>}
-      </div>
+      <section className="dashboard-grid">
+        <div className="risk-meter-card panel-card">
+          <h2>Scam Risk</h2>
+          {analysis && config ? (
+            <>
+              <div className="risk-meter">
+                <div className="risk-bar">
+                  {Object.entries(riskConfig).map(([key, val]) => (
+                    <div key={key} className={`segment ${key}`}>
+                      <span className="tooltip">{val.tooltip}</span>
+                      {val.label}
+                    </div>
+                  ))}
+                </div>
+                <div className="pointer" style={{ left: config.position }} />
+              </div>
+              <div className="scam-percentage">
+                <span className="percentage-number" style={{ color: config.color }}>{analysis.percentage}%</span>
+                <span className="percentage-label">{config.label} risk</span>
+              </div>
+            </>
+          ) : (
+            <div className="pending-analysis">Risk score will appear while recording.</div>
+          )}
+        </div>
 
-      {showTranscript && (
-        <div className="card">
+        <div className="card transcript-card panel-card">
           <h2>Live Transcript</h2>
           <p>
-            {analysis
-              ? highlightTranscript(sessionCommittedText, indicatorPhrases)
-              : sessionCommittedText}
-            {sessionPartialText && (
-              <span className="partial"> {sessionPartialText}</span>
-            )}
+            {showTranscript
+              ? (
+                <>
+                  {analysis
+                    ? highlightTranscript(sessionCommittedText, analysis.flaggedWords)
+                    : sessionCommittedText}
+                  {sessionPartialText && (
+                    <span className="partial"> {sessionPartialText}</span>
+                  )}
+                </>
+              )
+              : 'Waiting for transcript...'}
           </p>
         </div>
-      )}
+      </section>
 
-      {analysis && config && (
-        <>
-          <div className="risk-meter-card">
-            <h2>Risk Level</h2>
-            <div className="risk-meter">
-              <div className="risk-bar">
-                {Object.entries(riskConfig).map(([key, val]) => (
-                  <div key={key} className={`segment ${key}`}>
-                    <span className="tooltip">{val.tooltip}</span>
-                    {val.label}
-                  </div>
-                ))}
-              </div>
-              <div className="pointer" style={{ left: config.position }} />
-            </div>
-            <div className="scam-percentage">
-              <span className="percentage-number" style={{ color: config.color }}>{likelihood}%</span>
-              <span className="percentage-label">likelihood of scam</span>
-            </div>
+      {analysis && (
+        <section className="bottom-panel">
+          <div className="card reasoning-card">
+            <h2>Why It&apos;s A Scam</h2>
+            <p>{analysis.summary}</p>
           </div>
-
-          <div className="card">
-            <h2>Potential Indicator Phrases</h2>
-            <p>{indicatorPhrases.length > 0 ? indicatorPhrases.join(', ') : 'No critical indicators found yet.'}</p>
-          </div>
-
-          <div className="card">
-            <h2>Reasoning</h2>
-            <p>{analysis.reasoning_summary ?? 'No reasoning summary returned.'}</p>
-          </div>
-        </>
+        </section>
       )}
     </div>
   )

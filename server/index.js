@@ -8,7 +8,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.join(__dirname, ".env") });
+// Load project-root .env by default, then allow server/.env to override.
+dotenv.config({ path: path.join(__dirname, "..", ".env") });
+dotenv.config({ path: path.join(__dirname, ".env"), override: true });
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
@@ -129,7 +131,9 @@ app.get("/scribe-token", async (_req, res) => {
     res.json({ token });
   } catch (error) {
     console.error("Token error:", error);
-    res.status(500).json({ error: String(error) });
+    const message = String(error);
+    const status = message.includes("authenticated") ? 401 : 500;
+    res.status(status).json({ error: message });
   }
 });
 
