@@ -201,8 +201,8 @@ app.post("/api/analyze", async (req, res) => {
       return;
     }
 
-    //const result = await analyzeWithGemini(transcript);
-    const result = await analyzeWithGemma4(transcript);
+    const result = await analyzeWithGemini(transcript);
+    //const result = await analyzeWithGemma4(transcript);
     res.json(result);
     console.log("type:", typeof result);
     console.log("result:", result);
